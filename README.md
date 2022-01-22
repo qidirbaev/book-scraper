@@ -1,4 +1,5 @@
 # zio
 # book-scraper
 **Sample Book Data Scraper**
-    __zionet.uz__
+from
+    __ziyonet.uz__
