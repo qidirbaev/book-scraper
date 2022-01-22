@@ -5,24 +5,43 @@ const mongoose = require("mongoose");
 const EventEmitter = require('events');
 const { load } = require("cheerio");
 const { Book } = require("./models/BookModel.js");
+const readline = require("readline");
 
 // Promise based fs.writeFile
 const writeFile = util.promisify(fs.writeFile);
 
 const BASE_URL_FOR_DOWNLOAD = "http://library.ziyonet.uz/uz/book/download/";
 const BASE_URL_FOR_INDEX = "http://library.ziyonet.uz/uz/book/";
-const MAX_REQUEST_INDEX = 120802;
+const MAX_REQUEST_INDEX = 120805;
 const REQUEST_DELAY = 10000;
 let doneRequestNumbers = [];
+
+// get input from console via readline
+const input = (question) => {
+    return new Promise((resolve, reject) => {
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+
+        rl.question(question, (answer) => {
+            rl.close();
+            resolve(answer);
+        });
+    });
+};
 
 // eventEmitter
 const scrap = new EventEmitter();
 
-scrap.on('scraping start', first_nth => {
+scrap.on('scraping start', async () => {
+    const first_nth = parseInt(await input("Enter the number of starting book: "));
+
     console.log('Scraping started from index: ' + first_nth);
+    scrap.emit('new scrap', first_nth);
 });
 
-scrap.on('new scrap', async (nth) => {
+scrap.on('new scrap', (nth) => {
     console.log('Scraping started for book #' + nth);
     
     sendRequest(nth)
@@ -32,7 +51,7 @@ scrap.on('new scrap', async (nth) => {
         })
         .catch(error => {
             console.log('\tFetching book with error #' + nth);
-            console.log(error);
+            
             scrap.emit('scrap end', nth, 'error', error);
         });
 
@@ -47,28 +66,24 @@ scrap.on('scrap end', async (prev_nth, prev_state, prev_data) => {
     
     if ((prev_state === 'done') && prev_data) {
 
-        // scrap and save info about book
         try {
             const bookInfo = await scrapBookInfo(prev_nth);
+
             await writeFile('./data/bookInfo/' + prev_nth + '.json', JSON.stringify(bookInfo));
-            console.log('\t\tScraping info for book #' + prev_nth + ' is finished and successfuly saved'); 
-
-        } catch (ex) {
-            console.log('\t\tError scraping book info: #' + prev_nth);
-            console.log(ex);
-        }
-
-        // save binary data to file
-        try {
             await saveBinaryDataToFile(prev_data, prev_nth);
+            
+            console.log('\t\tScraping info for book #' + prev_nth + ' is finished and successfuly saved'); 
+            
         } catch (ex) {
-            console.log('Error saving file: #' + prev_nth, ex);
+            console.log('\t\tScraping info for book #' + prev_nth + ' is failed');
+            console.log(ex);
+            scrap.emit('scraping end', prev_nth); 
         }
 
     }
 
     if (prev_nth === MAX_REQUEST_INDEX) {
-        return scrap.emit('Scraping end', prev_nth);
+        return scrap.emit('scraping end', prev_nth);
     }
 
     await delay(REQUEST_DELAY);
@@ -76,13 +91,17 @@ scrap.on('scrap end', async (prev_nth, prev_state, prev_data) => {
     scrap.emit('new scrap', prev_nth + 1);
 });
 
-scrap.on('scraping end', async last_nth => {
+scrap.on('scraping end', last_nth => {
     console.log('Scraping is finished for last book #' + last_nth);
-    await mongoose.disconnect();
+    console.log('Done requests: ' + doneRequestNumbers);
+
+    // await mongoose.disconnect();
+    
+    process.exit(0);
 });
 
 // set up mongoose connect to mongodb function
-const connectToMongoDB = (async () => {
+const connectToMongoDB = async () => {
     try {
         await mongoose.connect(process.env.MONGO_URI, {
             useNewUrlParser: true,
@@ -94,7 +113,7 @@ const connectToMongoDB = (async () => {
     } catch (error) {
         console.log("Error connecting to MongoDB: ", error);
     }
-})();
+};
 
 // delay specified time
 const delay = (ms) => {
@@ -110,23 +129,25 @@ const scrapBookInfo = (nth) => {
         try {
             const { data } = await axios.get(url);
             const $ = load(data);
-            
+
             const tbody1 = $('#yw0').children('tbody')[0];
             const tbody2 = $('#yw0').next().children('tbody')[0];
-        
-            $.each(tbody1.children, (key, value) => {
+
+            for (let value of tbody1.children) {
                 bookInfo[$(value).children('th').text()] = $(value).children('td').text();
-            });
-        
-            $.each(tbody2.children, (key, value) => {
+            }
+
+            for (let value of tbody2.children) {
                 bookInfo[$(value).children('th').text()] = $(value).children('td').text();
-            });
+            }
+
+            console.log('\t\t\tBook #' + nth + ' info is parsed');
 
             resolve(bookInfo);
-    
+
         } catch (ex) {
             for (let key in bookInfo) delete bookInfo[key];
-            console.log('\t\tError while scraping book info: #' + nth);
+            console.log('\t\tError while parsing book info: #' + nth);
             console.log(ex);
             reject(ex);
         }
@@ -136,6 +157,8 @@ const scrapBookInfo = (nth) => {
 // save binary data to file
 
 const saveBinaryDataToFile = (data, nth) => {
+    const fileName = './data/bookData/' + nth + '.pdf';
+
     return new Promise(async (resolve, reject) => {
         try {
             await writeFile(fileName, data);
@@ -146,19 +169,7 @@ const saveBinaryDataToFile = (data, nth) => {
             reject(ex);
         }
     });
-}
-
-// const saveBinaryDataToFile = async (data, nth) => {
-//     const fileName = `./data/book-${nth}.pdf`;
-
-//     try {
-//         await writeFile(fileName, data);
-//         console.log('\t\tSaved file #' + nth);
-//     } catch (ex) {
-//         console.log('\t\tError saving file #' + nth);
-//         console.log(ex);
-//     }
-// };
+};
 
 // Request sender Promise function
 const sendRequest = (url) => {
@@ -167,10 +178,20 @@ const sendRequest = (url) => {
             responseType: 'arraybuffer'
         })
             .then(response => {
+                console.log('\t\tRequest for book #' + url + ' is successfuly sent');
                 resolve(response);
             })
             .catch(error => {
+                console.log('\t\tRequest for book #' + url + ' is failed');
                 reject(error);
             });
     });
 };
+
+// main function
+(async () => {
+
+    // await connectToMongoDB;
+    scrap.emit('scraping start');
+
+})();
